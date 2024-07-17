@@ -4,6 +4,7 @@ import argparse
 import itertools
 import copy
 import logging
+from collections import defaultdict
 
 import numpy as np
 import pandas as pd
@@ -40,9 +41,17 @@ class FosQca:
             if abstract_query[i] is None:
                 continue
 
-            query += f"`{self.variables[i]}`" + "==" + str(abstract_query[i]) + "&"
+            query += f"`{self.variables[i]}`" + "==" + str(abstract_query[i]) + " & "
 
-        return query[:-1]
+        return query[:-3]
+
+    @staticmethod
+    def query_len(query: str) -> int:
+        products = query.split(" | ")
+
+        return len(
+            list(itertools.chain.from_iterable(map(lambda p: p.split(" & "), products)))
+        )
 
     def generate_rules(self) -> dict[str, pd.DataFrame]:
         """
@@ -261,45 +270,75 @@ class FosQca:
 
         return rules
 
-    def get_minimal_necessary_rules(
-        self, rules: pd.DataFrame, dataset_name: str
-    ) -> pd.DataFrame:
+    def get_sufficient_rules(
+        self, rules: pd.DataFrame
+    ) -> list[tuple[str, dict[str, tuple[int, int]]]]:
         """
-        Get the minimal set of rules required to reach the coverage threshold
+        Get the set of rules that reach the consistency and coverage thresholds
+        on every input set
+
+        This is almost certainly horrendously inefficient, but if inefficient
+        works then inefficient it shall be
         """
 
-        rules = rules.sort_values(by=["positive_cases"], ascending=False)
+        # Generate all combinations of the possible rules
 
-        necessary_cases = set(
-            self.sets[dataset_name][
-                self.sets[dataset_name][self.outcome_col] == self.outcome_value
-            ].index.to_list()
+        rule_combinations = []
+        for r in range(len(rules) + 1):
+            rule_combinations.extend(itertools.combinations(rules["rule"].values, r))
+
+        rule_combinations = list(
+            map(
+                lambda rc: " | ".join(map(lambda r: f"({r})", list(rc))),
+                rule_combinations,
+            )
         )
 
-        covered_cases = set()
-        necessary_rules = []
+        # Apply each combination to every dataset and calculate consistency and coverage
 
-        for idx, rule in rules.iterrows():
-            # Get the rows matching the rule
-            result = self.sets[dataset_name].query(rule.get("rule"))
-            covered_cases.update(result.index.to_list())
-            necessary_rules.append(rule)
+        rule_stats = defaultdict(dict)
+        for rule in rule_combinations:
+            if rule == "":
+                continue
 
-            if covered_cases == necessary_cases:
-                break
+            for filename, dataset in self.sets.items():
+                result = dataset.query(rule)
 
-        necessary_rules = pd.DataFrame(
-            necessary_rules,
-            columns=[
-                "rule",
-                "values",
-                "positive_cases",
-                "negative_cases",
-                "consistency",
-            ],
-        )
+                cases_with_condition_and_outcome = len(
+                    result[result[self.outcome_col] == self.outcome_value]
+                )
+                cases_with_condition = len(result.values)
+                cases_with_outcome = len(
+                    dataset[dataset[self.outcome_col] == self.outcome_value]
+                )
 
-        return necessary_rules
+                consistency = cases_with_condition_and_outcome / cases_with_condition
+                coverage = cases_with_condition_and_outcome / cases_with_outcome
+
+                # print(f"{filename} : {rule} = {(consistency, coverage)}")
+
+                if (
+                    consistency < self.consistency_threshold
+                    or coverage < self.coverage_threshold
+                ):
+                    if rule in rule_stats:
+                        del rule_stats[rule]
+
+                    break
+
+                rule_stats[rule][filename] = (consistency, coverage)
+
+        # Average out the consistency and coverage
+
+        for rule, stats in rule_stats.items():
+            avg_cons = sum(map(lambda x: x[0], stats.values())) / len(stats.values())
+            avg_cov = sum(map(lambda x: x[1], stats.values())) / len(stats.values())
+
+            rule_stats[rule]["average"] = (avg_cons, avg_cov)
+
+        # yarr harr fiddle dee dee
+
+        return list(rule_stats.items())
 
 
 if __name__ == "__main__":
@@ -380,11 +419,30 @@ if __name__ == "__main__":
 
         logger.info(f"merged rules for {filename}:\n{merged_rules[filename]}\n")
 
-    # rules = rules[sets[0].attrs["file"]]
-    # merged_rules = qca.merge_rules(rules)
-    # merged_rules = merged_rules[sets[0].attrs["file"]]
+    total_merged_rules = list()
+    for file_rules in merged_rules.values():
+        total_merged_rules.extend(file_rules["rule"].values)
 
-    for filename, file_rules in merged_rules.items():
-        necessary_rules = qca.get_minimal_necessary_rules(file_rules, filename)
+    total_merged_rules = pd.DataFrame(total_merged_rules, columns=["rule"])
+    total_merged_rules = total_merged_rules.drop_duplicates()
 
-        logger.info(f"necessary rules for {filename}:\n{necessary_rules}\n")
+    print(f"final list of possible rules:\n{total_merged_rules}\n")
+
+    sufficient_rules = qca.get_sufficient_rules(total_merged_rules)
+    sufficient_rules.sort(
+        key=lambda r: r[1]["average"][0] * r[1]["average"][1], reverse=True
+    )
+    sufficient_rules.sort(key=lambda r: qca.query_len(r[0]), reverse=True)
+
+    for r in sufficient_rules:
+        formatted_rule = "\n".join(r[0].split(" | "))
+        formatted_info = "\n".join(
+            map(
+                lambda x: f"{x[0]} :: consistency: {x[1][0]} coverage: {x[1][1]}",
+                r[1].items(),
+            )
+        )
+
+        print(
+            f"solution with {qca.query_len(r[0])} terms:\n{formatted_rule}\n\n{formatted_info}\n\n"
+        )
