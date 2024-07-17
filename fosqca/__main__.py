@@ -259,6 +259,8 @@ class FosQca:
         Get the minimal number of rules that cover all positive outcomes
         """
 
+        rules = rules.sort_values(by=["positive_cases"], ascending=False)
+
         necessary_cases = set(
             self.sets[0][
                 self.sets[0][self.outcome_col] == self.outcome_value
