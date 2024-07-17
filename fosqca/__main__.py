@@ -25,210 +25,271 @@ class FosQca:
         self.outcome_value = int(outcome_value)
         self.consistency_threshold = consistency_threshold
 
-        self.necessity_conditions = []
-        self.variable_permutations = self.__generate_variable_permutations(variables)
+    def generate_query(self, abstract_query: list):
+        """
+        Generate a textual query from an abstract one
+        """
 
-    @classmethod
-    def __generate_variable_permutations(cls, items: list):
-        if len(items) == 0:
-            return [[]]
+        query = ""
 
-        return cls.__generate_variable_permutations(items[1:]) + [
-            [items[0]] + r for r in cls.__generate_variable_permutations(items[1:])
-        ]
+        for i in range(len(abstract_query)):
+            if abstract_query[i] is None:
+                continue
 
-    def candidate_rules(self):
+            query += f"`{self.variables[i]}`" + "==" + str(abstract_query[i]) + "&"
+
+        return query[:-1]
+
+    def generate_rules(self) -> pd.DataFrame:
         """
         Generate all possible variable rules for all input sets
         """
 
-        variable_permutations = self.variable_permutations
-
         rules = []
 
-        # go through each permutation of the variables
-        for i in range(len(variable_permutations)):
-            print(f"=== generating rules for variables {variable_permutations[i]} ===")
-            length = len(variable_permutations[i])
+        # get all the unique values each variable can assume
+        per_variable_unique_values = []
+        for i in range(len(self.variables)):
+            per_variable_unique_values.append(
+                list(self.sets[0][self.variables[i]].unique())
+            )
 
-            # get the unique values for each variable
-            per_column_unique_values = []
-            for j in range(length):
-                per_column_unique_values.append(
-                    list(self.sets[0][variable_permutations[i][j]].unique())
+        # generate every permutation of these unique values
+        unique_values_permutations = [
+            p for p in itertools.product(*per_variable_unique_values)
+        ]
+
+        for value_permutation in unique_values_permutations:
+            query = self.generate_query(value_permutation)
+
+            # Get the rows matching the query
+            result = self.sets[0].query(query)
+
+            if result.empty:
+                row = [query, value_permutation, 0, 0, -1.0]
+                rules.append(row)
+
+                continue
+
+            # Get the relative frequencies of the values of the outcome column
+            p = result[self.outcome_col].value_counts(normalize=True, dropna=False)
+
+            print(f"results for query {query}:\n{result}\n")
+            print(f"relative frequencies of outcome:\n{p}\n")
+
+            # consistency = (# cases with condition and outcome) / (# cases with condition)
+            # which is the same as the relative frequency of a 'correct' outcome in the result
+            # column
+            if p.get(self.outcome_value, 0.0) >= self.consistency_threshold:
+                row = [
+                    query,
+                    value_permutation,
+                    len(result[result[self.outcome_col] == self.outcome_value]),
+                    len(result[result[self.outcome_col] != self.outcome_value]),
+                    p.get(self.outcome_value, 0.0),
+                ]
+
+                rules.append(row)
+
+        print(f"generated {len(rules)} candidate rules")
+
+        rules = pd.DataFrame(
+            rules,
+            columns=[
+                "rule",
+                "values",
+                "positive_cases",
+                "negative_cases",
+                "consistency",
+            ],
+        )
+
+        return rules
+
+    @staticmethod
+    def can_be_merged(rulea: list, ruleb: list) -> (bool, int):
+        distance = 0
+        idx = 0
+
+        for i, (a, b) in enumerate(zip(rulea, ruleb)):
+            if a != b:
+                distance += 1
+                idx = i
+
+        if distance != 1:
+            return (False, idx)
+
+        return (True, idx)
+
+    def merge_rule_list(self, rules: pd.DataFrame) -> (pd.DataFrame, set):
+        """
+        Attempt to merge rules in a given list, returns the new list of rules
+        and a set of the rules that were merged and can thus be removed
+        """
+
+        merged_rules = set()
+        new_rules = []
+
+        for i in range(len(rules)):
+            rulea = rules.iloc[i]
+
+            for j in range(i + 1, len(rules)):
+                ruleb = rules.iloc[j]
+
+                cond_distance = self.can_be_merged(
+                    rulea.get("values"), ruleb.get("values")
                 )
-
-            print(f"unique values: {per_column_unique_values}")
-
-            # get every permutation of the unique values so that all possible conditions can be
-            # generated
-            unique_values_permutations = [
-                d for d in itertools.product(*per_column_unique_values)
-            ]
-
-            print(f"unique values permutations: {unique_values_permutations}")
-
-            # generate a query for every unique value of every variable
-            for r in range(len(unique_values_permutations)):
-                condition_query = ""
-                for j in range(length):
-                    condition_query += (
-                        f"`{variable_permutations[i][j]}`"
-                        + "=="
-                        + str(unique_values_permutations[r][j])
-                        + " & "
-                    )
-
-                # trim trailing ' & '
-                condition_query = condition_query[:-3]
-
-                print(f"condition query: {condition_query}")
-
-                # ignore queries that don't produce any results
-                if (
-                    condition_query == ""
-                    or len(self.sets[0].query(condition_query)) == 0
-                ):
-                    print("no results for query\n")
+                if not cond_distance[0]:
                     continue
 
+                cons = (rulea.get("consistency"), ruleb.get("consistency"))
+
+                match cons:
+                    case (
+                        x,
+                        y,
+                    ) if x >= self.consistency_threshold and y >= self.consistency_threshold:
+                        pass
+                    case (x, -1.0) if x >= self.consistency_threshold:
+                        pass
+                    case (-1.0, x) if x >= self.consistency_threshold:
+                        pass
+                    case _:
+                        continue
+
+                new_rule_values = copy.deepcopy(rulea.get("values"))
+                new_rule_values = list(new_rule_values)
+                new_rule_values[cond_distance[1]] = None
+                new_rule_values = tuple(new_rule_values)
+
+                new_query = self.generate_query(new_rule_values)
+
+                rulea_values = list(
+                    map(
+                        lambda x: int(x) if x is not None else None,
+                        list(rulea.get("values")),
+                    )
+                )
+                ruleb_values = list(
+                    map(
+                        lambda x: int(x) if x is not None else None,
+                        list(ruleb.get("values")),
+                    )
+                )
+                new_values_pretty = list(
+                    map(
+                        lambda x: int(x) if x is not None else None,
+                        list(new_rule_values),
+                    )
+                )
+                print(
+                    f"merged queries {rulea_values} {rulea.get("consistency")} + {ruleb_values} {ruleb.get("consistency")} -> {new_values_pretty}\n"
+                )
+
+                merged_rules.add(rulea.get("rule"))
+                merged_rules.add(ruleb.get("rule"))
+
                 # Get the rows matching the query
-                result = self.sets[0].query(condition_query)
+                result = self.sets[0].query(new_query)
+
+                if result.empty:
+                    row = [new_query, new_rule_values, 0, 0, -1.0]
+                    rules.append(row)
+
+                    continue
+
                 # Get the relative frequencies of the values of the outcome column
                 p = result[self.outcome_col].value_counts(normalize=True, dropna=False)
 
-                print(f"results for query:\n{result}\n")
-                print(f"relative frequencies of outcome:\n{p}\n")
+                # print(f"results for query {new_query}:\n{result}\n")
+                # print(f"relative frequencies of outcome:\n{p}\n")
 
                 # consistency = (# cases with condition and outcome) / (# cases with condition)
                 # which is the same as the relative frequency of a 'correct' outcome in the result
                 # column
-                if (
-                    p.idxmax() == self.outcome_value
-                    and p[p.idxmax()] >= self.consistency_threshold
-                ):
-                    # query, cutoff, consistency
+                if p.get(self.outcome_value, 0.0) >= self.consistency_threshold:
                     row = [
-                        condition_query,
+                        new_query,
+                        new_rule_values,
                         len(result[result[self.outcome_col] == self.outcome_value]),
-                        p[p.idxmax()],
+                        len(result[result[self.outcome_col] != self.outcome_value]),
+                        p.get(self.outcome_value, 0.0),
                     ]
 
-                    rules.append(row)
+                    new_rules.append(row)
 
-            print("\n\n")
+        new_rules = pd.DataFrame(
+            new_rules,
+            columns=[
+                "rule",
+                "values",
+                "positive_cases",
+                "negative_cases",
+                "consistency",
+            ],
+        )
 
-        rules.sort(key=lambda x: len(x[0]))
-        rules.sort(key=lambda x: x[1], reverse=True)
-        rules.sort(key=lambda x: x[2], reverse=True)
-        print("There are {} candidate rules in total.".format(len(rules)))
+        return (new_rules, merged_rules)
+
+    def merge_rules(self, rules: pd.DataFrame) -> pd.DataFrame:
+        new_rules, merged_rules = self.merge_rule_list(rules)
+        unmerged_rules = rules[
+            rules.apply(lambda r: r.get("rule") not in merged_rules, axis=1)
+        ]
+        rules = pd.concat([new_rules, unmerged_rules])
+
+        while True:
+            new_rules, merged_rules = self.merge_rule_list(rules)
+
+            if new_rules.empty:
+                break
+
+            unmerged_rules = rules[
+                rules.apply(lambda r: r.get("rule") not in merged_rules, axis=1)
+            ]
+            rules = pd.concat([new_rules, unmerged_rules])
+            rules = rules.drop_duplicates()
+
+            print(f"new rules:\n{rules}")
+
+        rules = rules.drop_duplicates()
 
         return rules
 
-    # def search_necessity(self):
-    #     # amount of rows where outcome_col == outcome_value
-    #     cases_with_outcome = len(
-    #         self.sets[0].loc[(self.sets[0][self.outcome_col] == self.outcome_value)]
-    #     )
+    def get_minimal_necessary_rules(self, rules: pd.DataFrame) -> pd.DataFrame:
+        """
+        Get the minimal number of rules that cover all positive outcomes
+        """
 
-    #     print(f"issue: {cases_with_outcome}")
+        necessary_cases = set(
+            self.sets[0][
+                self.sets[0][self.outcome_col] == self.outcome_value
+            ].index.to_list()
+        )
+        covered_cases = set()
+        necessary_rules = []
 
-    #     if cases_with_outcome == 0:
-    #         return
+        for idx, rule in rules.iterrows():
+            # Get the rows matching the rule
+            result = qca.sets[0].query(rule.get("rule"))
+            covered_cases.update(result.index.to_list())
+            necessary_rules.append(rule)
 
-    #     necessity = dict()
+            if covered_cases == necessary_cases:
+                break
 
-    #     for variable in self.variables:
-    #         for value in self.sets[0][variable].unique():
-    #             consistency = (
-    #                 len(
-    #                     self.sets[0].loc[
-    #                         (self.sets[0][self.outcome_col] == self.outcome_value)
-    #                         & (self.sets[0][variable] == float(value))
-    #                     ]
-    #                 )
-    #                 / cases_with_outcome
-    #             )
+        necessary_rules = pd.DataFrame(
+            necessary_rules,
+            columns=[
+                "rule",
+                "values",
+                "positive_cases",
+                "negative_cases",
+                "consistency",
+            ],
+        )
 
-    #             print(f"consistency for {variable}={value} :: {consistency}")
-
-    #             if consistency >= self.consistency_threshold:
-    #                 print("{}=={} is a necessity condition".format(variable, value))
-
-    #                 necessity[variable] = value
-    #                 self.necessity_conditions.append(
-    #                     f"`{variable}`" + "==" + str(value)
-    #                 )
-
-    # def __check_subset(self, new_rule, rules, unique_cover):
-    #     final_rules = copy.deepcopy(rules)
-    #     final_rules.append(new_rule)
-    #     rules = []
-    #     set_A = set()
-
-    #     for i in range(len(final_rules)):
-    #         set_B = set()
-    #         for j in range(i + 1, len(final_rules)):
-    #             temp = self.sets[0].query(final_rules[j])
-    #             index = set(
-    #                 temp[temp[self.outcome_col] == self.outcome_value].index.tolist()
-    #             )
-    #             set_B = set_B.union(index)
-    #             # temp[self.outcome_col].value_counts(normalize=False, dropna=True)
-
-    #         temp = self.sets[0].query(final_rules[i])
-    #         index = set(
-    #             temp[temp[self.outcome_col] == self.outcome_value].index.tolist()
-    #         )
-
-    #         if len(index.difference(set_B.union(set_A))) < unique_cover:
-    #             pass
-    #         else:
-    #             rules.append(final_rules[i])
-    #             set_A = set_A.union(index)
-
-    #     return rules, set_A
-
-    # def greedy(self, rules, unique_cover=1):
-    #     if len(rules) == 0:
-    #         print("The candidate rule list is empty.")
-    #         return [], set()
-
-    #     final_set = set()
-    #     final_rules = []
-    #     for i in range(len(rules)):
-    #         print(f"'checking' rule {rules[i][0]}")
-
-    #         flag = False
-    #         for necessity_condition in self.necessity_conditions:
-    #             if necessity_condition in rules[i][0]:
-    #                 flag = True
-
-    #         if flag:
-    #             continue
-
-    #         temp_final_rule, temp_set = self.__check_subset(
-    #             rules[i][0], final_rules, unique_cover
-    #         )
-
-    #         if len(temp_set) > len(final_set):
-    #             final_rules, final_set = temp_final_rule, temp_set
-
-    #     if len(final_rules) == 0:
-    #         return [], set()
-
-    #     for i in range(len(final_rules)):
-    #         for j in range(len(self.necessity_conditions)):
-    #             final_rules[i] = final_rules[i] + " & " + self.necessity_conditions[j]
-
-    #     final_set = set()
-    #     for rule in final_rules:
-    #         cases = self.sets[0].query(rule)
-    #         final_set = final_set.union(
-    #             set(list(cases[cases[self.outcome_col] == self.outcome_value].index))
-    #         )
-
-    #     return final_rules, final_set
+        return necessary_rules
 
 
 if __name__ == "__main__":
@@ -277,18 +338,14 @@ if __name__ == "__main__":
         consistency_threshold=args.consistency,
     )
 
-    rules = qca.candidate_rules()
-    rules = pd.DataFrame(
-        rules, columns=["candidate_rule", "cutoff", "consistency"]
-    ).sort_values(by=["cutoff", "consistency"], ascending=False)
+    rules = qca.generate_rules()
 
-    print(rules)
-    print()
+    print(f"possible rules:\n{rules}\n")
 
-    # qca.search_necessity()
-    # print(f"necessity conditions: {qca.necessity_conditions}")
+    merged_rules = qca.merge_rules(rules)
 
-    # config, sets = qca.greedy(rules.values.tolist())
+    print(f"merged rules:\n{merged_rules}\n")
 
-    # print(config)
-    # print(sets)
+    necessary_rules = qca.get_minimal_necessary_rules(merged_rules)
+
+    print(f"necessary rules:\n{necessary_rules}\n")
