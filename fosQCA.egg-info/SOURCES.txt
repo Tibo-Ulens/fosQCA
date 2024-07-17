@@ -1,0 +1,13 @@
+LICENSE
+README.md
+pyproject.toml
+setup.py
+fosQCA.egg-info/PKG-INFO
+fosQCA.egg-info/SOURCES.txt
+fosQCA.egg-info/dependency_links.txt
+fosQCA.egg-info/entry_points.txt
+fosQCA.egg-info/requires.txt
+fosQCA.egg-info/top_level.txt
+fosqca/__init__.py
+fosqca/__main__.py
+fosqca/fosqca.py

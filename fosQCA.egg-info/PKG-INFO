@@ -1,0 +1,11 @@
+Metadata-Version: 2.1
+Name: fosQCA
+Version: 0.1.0
+Summary: A QCA tool that can optimise solutions for multiple input sets
+Home-page: https://github.com/Tibo-Ulens/fosQCA
+Author: Tibo Ulens
+Author-email: ulens.tibo@gmail.com
+License: MIT
+Platform: all
+License-File: LICENSE
+Requires-Dist: pandas
