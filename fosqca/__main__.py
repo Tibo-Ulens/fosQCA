@@ -121,10 +121,10 @@ class FosQca:
 
         return (True, idx)
 
-    def merge_rule_list(self, rules: pd.DataFrame) -> (pd.DataFrame, set):
+    def merge_rule_list(self, rules: pd.DataFrame) -> (pd.DataFrame, pd.DataFrame):
         """
         Attempt to merge rules in a given list, returns the new list of rules
-        and a set of the rules that were merged and can thus be removed
+        and a list of the unmerged rules that should be retained
         """
 
         merged_rules = set()
@@ -153,6 +153,8 @@ class FosQca:
                     case (x, -1.0) if x >= self.consistency_threshold:
                         pass
                     case (-1.0, x) if x >= self.consistency_threshold:
+                        pass
+                    case (-1.0, -1.0):
                         pass
                     case _:
                         continue
@@ -194,7 +196,7 @@ class FosQca:
 
                 if result.empty:
                     row = [new_query, new_rule_values, 0, 0, -1.0]
-                    rules.append(row)
+                    new_rules.append(row)
 
                     continue
 
@@ -229,30 +231,26 @@ class FosQca:
             ],
         )
 
-        return (new_rules, merged_rules)
-
-    def merge_rules(self, rules: pd.DataFrame) -> pd.DataFrame:
-        new_rules, merged_rules = self.merge_rule_list(rules)
         unmerged_rules = rules[
             rules.apply(lambda r: r.get("rule") not in merged_rules, axis=1)
         ]
+
+        return (new_rules, unmerged_rules)
+
+    def merge_rules(self, rules: pd.DataFrame) -> pd.DataFrame:
+        new_rules, unmerged_rules = self.merge_rule_list(rules)
         rules = pd.concat([new_rules, unmerged_rules])
 
         while True:
-            new_rules, merged_rules = self.merge_rule_list(rules)
+            new_rules, unmerged_rules = self.merge_rule_list(rules)
 
             if new_rules.empty:
                 break
 
-            unmerged_rules = rules[
-                rules.apply(lambda r: r.get("rule") not in merged_rules, axis=1)
-            ]
             rules = pd.concat([new_rules, unmerged_rules])
             rules = rules.drop_duplicates()
 
             print(f"new rules:\n{rules}")
-
-        rules = rules.drop_duplicates()
 
         return rules
 
