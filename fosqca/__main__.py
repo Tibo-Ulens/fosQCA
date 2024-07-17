@@ -270,6 +270,36 @@ class FosQca:
 
         return rules
 
+    def evaluate_query(self, query: str) -> dict[str, tuple[int, int]]:
+        rule_stats = dict()
+
+        for filename, dataset in self.sets.items():
+            result = dataset.query(query)
+
+            cases_with_condition_and_outcome = len(
+                result[result[self.outcome_col] == self.outcome_value]
+            )
+            cases_with_condition = len(result.values)
+            cases_with_outcome = len(
+                dataset[dataset[self.outcome_col] == self.outcome_value]
+            )
+
+            consistency = cases_with_condition_and_outcome / cases_with_condition
+            coverage = cases_with_condition_and_outcome / cases_with_outcome
+
+            rule_stats[filename] = (consistency, coverage)
+
+        avg_cons = sum(map(lambda x: x[0], rule_stats.values())) / len(
+            rule_stats.values()
+        )
+        avg_cov = sum(map(lambda x: x[1], rule_stats.values())) / len(
+            rule_stats.values()
+        )
+
+        rule_stats["average"] = (avg_cons, avg_cov)
+
+        return rule_stats
+
     def get_sufficient_rules(
         self, rules: pd.DataFrame
     ) -> list[tuple[str, dict[str, tuple[int, int]]]]:
@@ -315,8 +345,6 @@ class FosQca:
                 consistency = cases_with_condition_and_outcome / cases_with_condition
                 coverage = cases_with_condition_and_outcome / cases_with_outcome
 
-                # print(f"{filename} : {rule} = {(consistency, coverage)}")
-
                 if (
                     consistency < self.consistency_threshold
                     or coverage < self.coverage_threshold
@@ -352,6 +380,7 @@ if __name__ == "__main__":
     parser.add_argument("--verbose", action="count", default=0)
     parser.add_argument("-c", "--consistency", default=0.8, type=float)
     parser.add_argument("-v", "--coverage", default=0.8, type=float)
+    parser.add_argument("-f", "--formula")
     parser.add_argument("sets", nargs="*")
 
     args = parser.parse_args()
@@ -408,6 +437,22 @@ if __name__ == "__main__":
         coverage_threshold=args.coverage,
     )
 
+    if args.formula:
+        print(f"evaluating {args.formula} on all input sets...\n")
+
+        result = qca.evaluate_query(args.formula)
+
+        formatted_info = "\n".join(
+            map(
+                lambda x: f"{x[0]} :: consistency: {x[1][0]} coverage: {x[1][1]}",
+                result.items(),
+            )
+        )
+
+        print(formatted_info)
+
+        sys.exit(0)
+
     rules = qca.generate_rules()
 
     for filename, file_rules in rules.items():
@@ -429,10 +474,8 @@ if __name__ == "__main__":
     print(f"final list of possible rules:\n{total_merged_rules}\n")
 
     sufficient_rules = qca.get_sufficient_rules(total_merged_rules)
-    sufficient_rules.sort(
-        key=lambda r: r[1]["average"][0] * r[1]["average"][1], reverse=True
-    )
     sufficient_rules.sort(key=lambda r: qca.query_len(r[0]), reverse=True)
+    sufficient_rules.sort(key=lambda r: r[1]["average"])
 
     for r in sufficient_rules:
         formatted_rule = "\n".join(r[0].split(" | "))
