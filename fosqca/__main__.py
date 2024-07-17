@@ -15,7 +15,7 @@ logger = logging.getLogger("fosQCA")
 class FosQca:
     def __init__(
         self,
-        sets: list[pd.DataFrame],
+        sets: dict[str, pd.DataFrame],
         variables: list[str],
         outcome_col: str,
         outcome_value: int,
@@ -44,66 +44,71 @@ class FosQca:
 
         return query[:-1]
 
-    def generate_rules(self) -> pd.DataFrame:
+    def generate_rules(self) -> dict[str, pd.DataFrame]:
         """
         Generate all possible variable rules for all input sets
         """
 
-        rules = []
+        rules = dict()
 
-        # get all the unique values each variable can assume
-        per_variable_unique_values = []
-        for i in range(len(self.variables)):
-            per_variable_unique_values.append(
-                list(self.sets[0][self.variables[i]].unique())
+        for filename, dataset in self.sets.items():
+            dataset_rules = []
+
+            # get all the unique values each variable can assume
+            per_variable_unique_values = []
+            for i in range(len(self.variables)):
+                per_variable_unique_values.append(
+                    list(dataset[self.variables[i]].unique())
+                )
+
+            # generate every permutation of these unique values
+            unique_values_permutations = [
+                p for p in itertools.product(*per_variable_unique_values)
+            ]
+
+            for value_permutation in unique_values_permutations:
+                query = self.generate_query(value_permutation)
+
+                # Get the rows matching the query
+                result = dataset.query(query)
+
+                if result.empty:
+                    row = [query, value_permutation, 0, 0, -1.0]
+                    dataset_rules.append(row)
+
+                    continue
+
+                # Get the relative frequencies of the values of the outcome column
+                p = result[self.outcome_col].value_counts(normalize=True, dropna=False)
+
+                # consistency = (# cases with condition and outcome) / (# cases with condition)
+                # which is the same as the relative frequency of a 'correct' outcome in the result
+                # column
+                if p.get(self.outcome_value, 0.0) >= self.consistency_threshold:
+                    row = [
+                        query,
+                        value_permutation,
+                        len(result[result[self.outcome_col] == self.outcome_value]),
+                        len(result[result[self.outcome_col] != self.outcome_value]),
+                        p.get(self.outcome_value, 0.0),
+                    ]
+
+                    dataset_rules.append(row)
+
+            dataset_rules = pd.DataFrame(
+                dataset_rules,
+                columns=[
+                    "rule",
+                    "values",
+                    "positive_cases",
+                    "negative_cases",
+                    "consistency",
+                ],
             )
 
-        # generate every permutation of these unique values
-        unique_values_permutations = [
-            p for p in itertools.product(*per_variable_unique_values)
-        ]
+            dataset_rules = dataset_rules.drop_duplicates()
 
-        for value_permutation in unique_values_permutations:
-            query = self.generate_query(value_permutation)
-
-            # Get the rows matching the query
-            result = self.sets[0].query(query)
-
-            if result.empty:
-                row = [query, value_permutation, 0, 0, -1.0]
-                rules.append(row)
-
-                continue
-
-            # Get the relative frequencies of the values of the outcome column
-            p = result[self.outcome_col].value_counts(normalize=True, dropna=False)
-
-            # consistency = (# cases with condition and outcome) / (# cases with condition)
-            # which is the same as the relative frequency of a 'correct' outcome in the result
-            # column
-            if p.get(self.outcome_value, 0.0) >= self.consistency_threshold:
-                row = [
-                    query,
-                    value_permutation,
-                    len(result[result[self.outcome_col] == self.outcome_value]),
-                    len(result[result[self.outcome_col] != self.outcome_value]),
-                    p.get(self.outcome_value, 0.0),
-                ]
-
-                rules.append(row)
-
-        logger.info(f"generated {len(rules)} candidate rules")
-
-        rules = pd.DataFrame(
-            rules,
-            columns=[
-                "rule",
-                "values",
-                "positive_cases",
-                "negative_cases",
-                "consistency",
-            ],
-        )
+            rules[filename] = dataset_rules
 
         return rules
 
@@ -122,7 +127,9 @@ class FosQca:
 
         return (True, idx)
 
-    def merge_rule_list(self, rules: pd.DataFrame) -> (pd.DataFrame, pd.DataFrame):
+    def merge_rule_list(
+        self, rules: pd.DataFrame, dataset_name: str
+    ) -> (pd.DataFrame, pd.DataFrame):
         """
         Attempt to merge rules in a given list, returns the new list of rules
         and a list of the unmerged rules that should be retained
@@ -194,7 +201,8 @@ class FosQca:
                 merged_rules.add(ruleb.get("rule"))
 
                 # Get the rows matching the query
-                result = self.sets[0].query(new_query)
+                # result = self.sets[0].query(new_query)
+                result = self.sets[dataset_name].query(new_query)
 
                 if result.empty:
                     row = [new_query, new_rule_values, 0, 0, -1.0]
@@ -236,12 +244,12 @@ class FosQca:
 
         return (new_rules, unmerged_rules)
 
-    def merge_rules(self, rules: pd.DataFrame) -> pd.DataFrame:
-        new_rules, unmerged_rules = self.merge_rule_list(rules)
+    def merge_rules(self, rules: pd.DataFrame, dataset_name: str) -> pd.DataFrame:
+        new_rules, unmerged_rules = self.merge_rule_list(rules, dataset_name)
         rules = pd.concat([new_rules, unmerged_rules])
 
         while True:
-            new_rules, unmerged_rules = self.merge_rule_list(rules)
+            new_rules, unmerged_rules = self.merge_rule_list(rules, dataset_name)
 
             if new_rules.empty:
                 break
@@ -253,7 +261,9 @@ class FosQca:
 
         return rules
 
-    def get_minimal_necessary_rules(self, rules: pd.DataFrame) -> pd.DataFrame:
+    def get_minimal_necessary_rules(
+        self, rules: pd.DataFrame, dataset_name: str
+    ) -> pd.DataFrame:
         """
         Get the minimal set of rules required to reach the coverage threshold
         """
@@ -261,16 +271,17 @@ class FosQca:
         rules = rules.sort_values(by=["positive_cases"], ascending=False)
 
         necessary_cases = set(
-            self.sets[0][
-                self.sets[0][self.outcome_col] == self.outcome_value
+            self.sets[dataset_name][
+                self.sets[dataset_name][self.outcome_col] == self.outcome_value
             ].index.to_list()
         )
+
         covered_cases = set()
         necessary_rules = []
 
         for idx, rule in rules.iterrows():
             # Get the rows matching the rule
-            result = qca.sets[0].query(rule.get("rule"))
+            result = self.sets[dataset_name].query(rule.get("rule"))
             covered_cases.update(result.index.to_list())
             necessary_rules.append(rule)
 
@@ -318,22 +329,27 @@ if __name__ == "__main__":
     logger.setLevel(verbosity)
     logger.addHandler(handler)
 
+    if len(args.sets) < 1:
+        print("at least 1 dataset is required")
+        sys.exit(1)
+
     for set_file in args.sets:
         if not os.path.isfile(set_file):
             print(f"'{set_file}' is not a file")
             sys.exit(1)
 
-    sets = []
+    sets = dict()
+    cols = None
     for set_file in args.sets:
         data = pd.read_csv(set_file)
         data.attrs = {"file": set_file}
 
-        sets.append(data)
+        sets[set_file] = data
+        cols = data.columns
 
-    cols = sets[0].columns
-    for s in sets[1:]:
+    for filename, s in sets.items():
         if (s.columns != cols).any():
-            print(f"{s.attrs["file"]} has invalid headers, expected {list(cols)}")
+            print(f"{filename} has invalid headers, expected {list(cols)}")
 
     cols = list(cols)
 
@@ -355,12 +371,20 @@ if __name__ == "__main__":
 
     rules = qca.generate_rules()
 
-    logger.info(f"possible rules:\n{rules}\n")
+    for filename, file_rules in rules.items():
+        logger.info(f"possible rules for {filename}:\n{file_rules}\n")
 
-    merged_rules = qca.merge_rules(rules)
+    merged_rules = dict()
+    for filename, file_rules in rules.items():
+        merged_rules[filename] = qca.merge_rules(file_rules, filename)
 
-    logger.info(f"merged rules:\n{merged_rules}\n")
+        logger.info(f"merged rules for {filename}:\n{merged_rules[filename]}\n")
 
-    necessary_rules = qca.get_minimal_necessary_rules(merged_rules)
+    # rules = rules[sets[0].attrs["file"]]
+    # merged_rules = qca.merge_rules(rules)
+    # merged_rules = merged_rules[sets[0].attrs["file"]]
 
-    print(f"necessary rules:\n{necessary_rules}\n")
+    for filename, file_rules in merged_rules.items():
+        necessary_rules = qca.get_minimal_necessary_rules(file_rules, filename)
+
+        logger.info(f"necessary rules for {filename}:\n{necessary_rules}\n")
