@@ -3,9 +3,13 @@ import os
 import argparse
 import itertools
 import copy
+import logging
 
 import numpy as np
 import pandas as pd
+
+
+logger = logging.getLogger("fosQCA")
 
 
 class FosQca:
@@ -14,16 +18,16 @@ class FosQca:
         sets: list[pd.DataFrame],
         variables: list[str],
         outcome_col: str,
-        caseid_col: str,
         outcome_value: int,
         consistency_threshold: float,
+        coverage_threshold: float,
     ):
         self.sets = sets
         self.variables = variables
         self.outcome_col = outcome_col
-        self.caseid_col = caseid_col
         self.outcome_value = int(outcome_value)
         self.consistency_threshold = consistency_threshold
+        self.coverage_threshold = coverage_threshold
 
     def generate_query(self, abstract_query: list):
         """
@@ -74,9 +78,6 @@ class FosQca:
             # Get the relative frequencies of the values of the outcome column
             p = result[self.outcome_col].value_counts(normalize=True, dropna=False)
 
-            print(f"results for query {query}:\n{result}\n")
-            print(f"relative frequencies of outcome:\n{p}\n")
-
             # consistency = (# cases with condition and outcome) / (# cases with condition)
             # which is the same as the relative frequency of a 'correct' outcome in the result
             # column
@@ -91,7 +92,7 @@ class FosQca:
 
                 rules.append(row)
 
-        print(f"generated {len(rules)} candidate rules")
+        logger.info(f"generated {len(rules)} candidate rules")
 
         rules = pd.DataFrame(
             rules,
@@ -184,7 +185,8 @@ class FosQca:
                         list(new_rule_values),
                     )
                 )
-                print(
+
+                logger.debug(
                     f"merged queries {rulea_values} {rulea.get("consistency")} + {ruleb_values} {ruleb.get("consistency")} -> {new_values_pretty}\n"
                 )
 
@@ -202,9 +204,6 @@ class FosQca:
 
                 # Get the relative frequencies of the values of the outcome column
                 p = result[self.outcome_col].value_counts(normalize=True, dropna=False)
-
-                # print(f"results for query {new_query}:\n{result}\n")
-                # print(f"relative frequencies of outcome:\n{p}\n")
 
                 # consistency = (# cases with condition and outcome) / (# cases with condition)
                 # which is the same as the relative frequency of a 'correct' outcome in the result
@@ -250,13 +249,13 @@ class FosQca:
             rules = pd.concat([new_rules, unmerged_rules])
             rules = rules.drop_duplicates()
 
-            print(f"new rules:\n{rules}")
+            logger.debug(f"new rules:\n{rules}\n")
 
         return rules
 
     def get_minimal_necessary_rules(self, rules: pd.DataFrame) -> pd.DataFrame:
         """
-        Get the minimal number of rules that cover all positive outcomes
+        Get the minimal set of rules required to reach the coverage threshold
         """
 
         rules = rules.sort_values(by=["positive_cases"], ascending=False)
@@ -297,13 +296,27 @@ if __name__ == "__main__":
     pd.set_option("display.max_rows", None)
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("-o", "--outcome-col", default="outcome")
-    parser.add_argument("-c", "--caseid-col", default="case")
-    parser.add_argument("-v", "--outcome-value", default=1, type=int)
-    parser.add_argument("--consistency", default=0.8, type=float)
+    parser.add_argument("-l", "--outcome-col", default="outcome")
+    parser.add_argument("-o", "--outcome-value", default=1, type=float)
+    parser.add_argument("-i", "--ignore-col", action="append")
+    parser.add_argument("--verbose", action="count", default=0)
+    parser.add_argument("-c", "--consistency", default=0.8, type=float)
+    parser.add_argument("-v", "--coverage", default=0.8, type=float)
     parser.add_argument("sets", nargs="*")
 
     args = parser.parse_args()
+
+    match args.verbose:
+        case 0:
+            verbosity = logging.INFO
+        case _:
+            verbosity = logging.DEBUG
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(levelname)s - %(message)s"))
+
+    logger.setLevel(verbosity)
+    logger.addHandler(handler)
 
     for set_file in args.sets:
         if not os.path.isfile(set_file):
@@ -326,25 +339,27 @@ if __name__ == "__main__":
 
     if args.outcome_col in cols:
         cols.remove(args.outcome_col)
-    if args.caseid_col in cols:
-        cols.remove(args.caseid_col)
+
+    for ignored in args.ignore_col:
+        if ignored in cols:
+            cols.remove(ignored)
 
     qca = FosQca(
         sets,
         variables=cols,
         outcome_col=args.outcome_col,
-        caseid_col=args.caseid_col,
         outcome_value=args.outcome_value,
         consistency_threshold=args.consistency,
+        coverage_threshold=args.coverage,
     )
 
     rules = qca.generate_rules()
 
-    print(f"possible rules:\n{rules}\n")
+    logger.info(f"possible rules:\n{rules}\n")
 
     merged_rules = qca.merge_rules(rules)
 
-    print(f"merged rules:\n{merged_rules}\n")
+    logger.info(f"merged rules:\n{merged_rules}\n")
 
     necessary_rules = qca.get_minimal_necessary_rules(merged_rules)
 
