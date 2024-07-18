@@ -1,8 +1,10 @@
+# -*- coding: utf-8 -*-
+
 from setuptools import setup, find_packages
 
 setup(
     name="fosQCA",
-    version="0.1.0",
+    version="0.2.0",
     author="Tibo Ulens",
     author_email="ulens.tibo@gmail.com",
     description="A QCA tool that can optimise solutions for multiple input sets",
